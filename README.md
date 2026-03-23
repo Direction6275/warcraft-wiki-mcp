@@ -31,7 +31,7 @@ It complements structural API tools (like [wow-api-mcp](https://github.com/Wutna
 **Requirements:** Node.js >= 18.0.0
 
 ```bash
-git clone https://github.com/<your-username>/warcraft-wiki-mcp.git
+git clone https://github.com/Direction6275/warcraft-wiki-mcp.git
 cd warcraft-wiki-mcp
 npm install
 ```
