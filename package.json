@@ -1,0 +1,21 @@
+{
+  "name": "warcraft-wiki-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Warcraft wiki — behavioral API docs, usage notes, patch history. Queries warcraft.wiki.gg MediaWiki API on demand.",
+  "type": "module",
+  "main": "src/index.mjs",
+  "bin": {
+    "warcraft-wiki-mcp": "src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "node-html-parser": "^7.1.0"
+  }
+}
