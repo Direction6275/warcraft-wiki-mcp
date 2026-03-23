@@ -75,7 +75,7 @@ Lists all wiki pages matching a namespace prefix. Handles C_ namespace scoping b
 
 ## How It Works
 
-All data comes from the MediaWiki API at [`warcraft.wiki.gg/api.php`](https://warcraft.wiki.gg/api.php):
+All data comes from [warcraft.wiki.gg](https://warcraft.wiki.gg) via its MediaWiki API:
 
 | Endpoint | Used by | What it returns |
 |----------|---------|-----------------|
