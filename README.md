@@ -1,6 +1,6 @@
 # warcraft-wiki-mcp
 
-MCP server that gives LLMs live access to [warcraft.wiki.gg](https://warcraft.wiki.gg) — the community-maintained source for WoW API behavioral documentation.
+MCP server that gives LLMs live access to [warcraft.wiki.gg](https://warcraft.wiki.gg) API documentation — the community-maintained source for WoW API behavioral notes, restrictions, and patch history.
 
 ## Why this server?
 
@@ -8,34 +8,47 @@ MCP server that gives LLMs live access to [warcraft.wiki.gg](https://warcraft.wi
 - **API signatures alone aren't enough.** Knowing that `C_Spell.GetSpellCooldown()` returns `{ startTime, duration, ... }` doesn't tell you that `startTime` and `duration` are secret values in 12.0.x that can't be used in Lua arithmetic. That critical behavioral context lives on the wiki.
 - **No way to verify APIs without tools.** Without live lookup, an LLM will confidently generate code using deprecated or non-existent APIs.
 
-This server queries the wiki on demand and returns structured, clean text — not raw HTML:
+This server queries the wiki on demand and returns clean text plus structured fields — not raw HTML:
 
 - Descriptions, parameter docs, return values, and code examples
 - Behavioral details and usage gotchas
 - Deprecation notices
+- Event payload sections
+- Restriction and compatibility notes surfaced by the wiki
 - Patch history
+- Structured argument/return/payload items for agent use
+- Explicit deprecation and replacement metadata when the wiki exposes it
+- Conflict signals when the deprecated banner and patch history disagree
+- Retry/throttle behavior that is safer under bursty agent lookups
+- Safer legacy-page parsing that prefers clean text over misleading fake structure
+- Search ranking biased toward current namespaced APIs when broad queries are ambiguous
 
 It complements structural API tools (like [wow-api-mcp](https://github.com/Wutname1/wow-api-mcp) which provides type signatures, enums, and event definitions) with the behavioral layer that only the wiki documents.
+
+The server is intentionally scoped to API and closely related technical documentation. It is not designed for general Warcraft Wiki article browsing.
 
 ## Tools
 
 | Tool | Purpose | Example input |
 |------|---------|---------------|
-| `wiki_lookup` | Fetch a specific API function or event page | `C_Spell.GetSpellCooldown`, `SPELL_UPDATE_COOLDOWN` |
-| `wiki_search` | Full-text search across the wiki | `"spell cooldown"`, `"unit aura tracking"` |
+| `wiki_lookup` | Fetch a specific API function, event, or exact technical doc page | `C_Spell.GetSpellCooldown`, `SPELL_UPDATE_COOLDOWN` |
+| `wiki_search` | Search API/event/technical documentation pages only | `"spell cooldown"`, `"unit aura tracking"` |
 | `wiki_namespace` | List all pages under a namespace prefix | `C_Spell`, `C_Item`, `GetSpell` |
 
 ### wiki_lookup
 
-Fetches a specific API function or event page and returns structured content.
+Fetches a specific API function, event, or exact technical page and returns readable text plus structured content.
 
 - **Auto-detection:** Function names get an `API_` prefix for the wiki page title (`C_Spell.GetSpellCooldown` -> `API_C_Spell.GetSpellCooldown`). Event names in ALL_CAPS are used as-is (`SPELL_UPDATE_COOLDOWN`).
-- **Section filtering:** Optional `section` parameter narrows the response to: `description`, `arguments`, `returns`, `details`, `example`, `patch_changes`, `see_also`, or `all` (default).
+- **Section filtering:** Optional `section` parameter narrows the response to: `description`, `arguments`, `returns`, `payload`, `details`, `example`, `patch_changes`, `see_also`, `fields`, `members`, `values`, `related_events`, or `all` (default).
 - **Deprecation notices:** Automatically extracted and displayed when present.
+- **Structured output:** Includes normalized fields such as `pageKind`, `description`, `payload`, `patchChanges`, `relatedEvents`, `availableSections`, `deprecationInfo`, and structured section data like `argumentsData`, `returnsData`, and `payloadData`.
+- **Conflict-aware deprecation metadata:** `deprecationInfo` now includes `hasConflict`, `conflictDetails`, and `recommendedState` so callers can detect when banner text and patch history disagree.
+- **Lean section focus:** When `section` is provided, the response also includes `selectedSection`, `selectedSectionText`, and `selectedSectionData`.
 
 ### wiki_search
 
-Full-text search across the entire wiki. Returns up to 20 results with page titles and text snippets. Useful for discovering APIs when you don't know the exact name.
+Searches Warcraft Wiki technical documentation only. General gameplay and random wiki articles are filtered out so agents stay focused on APIs, events, enums, widgets, and closely related technical pages. Returns up to 20 filtered results with titles, page kinds, URLs, and text snippets.
 
 ### wiki_namespace
 
@@ -80,7 +93,7 @@ All data comes from [warcraft.wiki.gg](https://warcraft.wiki.gg) via its MediaWi
 | `action=query&list=search` | `wiki_search` | Matching pages with text snippets |
 | `action=query&list=allpages` | `wiki_namespace` | All pages matching a title prefix |
 
-The wiki returns MediaWiki HTML. The parser strips noise (navigation, info boxes), extracts deprecation notices, splits content at `<h2>` boundaries into named sections, and converts HTML to clean text (code blocks become markdown fences, definition lists become indented text, tables become pipe-separated rows).
+The wiki returns MediaWiki HTML. The parser strips noise (navigation, compatibility metadata tables, info boxes), extracts deprecation notices, surfaces banner-vs-patch conflicts, salvages legacy inline sections, splits content at `<h2>` boundaries into named sections, and converts HTML to clean text (code blocks become markdown fences, definition lists become indented text, tables become pipe-separated rows).
 
 ```
 src/
@@ -89,11 +102,21 @@ src/
   html-parser.mjs    MediaWiki HTML -> structured text sections
 ```
 
-**Technical details:** 4-hour in-memory cache (TTL per entry, no persistence across restarts). 10-second timeout per request. Graceful error handling for missing pages and network failures.
+**Technical details:** 4-hour in-memory cache (TTL per entry, no persistence across restarts). 10-second timeout per request. In-flight request coalescing, throttling, and retry/backoff are built in for live wiki calls. Graceful error handling for missing pages and network failures. Search is API-scoped by default.
 
 ## Maintenance
 
-**This server requires zero maintenance.** All content comes live from the wiki. After WoW patches, the wiki community updates pages and this server automatically serves the new content.
+The content source is low maintenance because it comes live from the wiki, but the parser still needs occasional upkeep if the wiki changes its HTML structure.
+
+## Testing
+
+Run the smoke test with:
+
+```bash
+npm test
+```
+
+The smoke test spins up the local MCP server through the SDK client and verifies representative lookup and search behavior against live wiki data.
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
