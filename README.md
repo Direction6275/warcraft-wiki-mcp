@@ -22,6 +22,8 @@ This server queries the wiki on demand and returns clean text plus structured fi
 - Retry/throttle behavior that is safer under bursty agent lookups
 - Safer legacy-page parsing that prefers clean text over misleading fake structure
 - Search ranking biased toward current namespaced APIs when broad queries are ambiguous
+- Agent-facing coding notes, warnings, and related-event signals for safer code decisions
+- A resolver tool that turns coding intent into ranked API/event documentation candidates
 
 It complements structural API tools (like [wow-api-mcp](https://github.com/Wutname1/wow-api-mcp) which provides type signatures, enums, and event definitions) with the behavioral layer that only the wiki documents.
 
@@ -32,6 +34,7 @@ The server is intentionally scoped to API and closely related technical document
 | Tool | Purpose | Example input |
 |------|---------|---------------|
 | `wiki_lookup` | Fetch a specific API function, event, or exact technical doc page | `C_Spell.GetSpellCooldown`, `SPELL_UPDATE_COOLDOWN` |
+| `wiki_resolve` | Turn a coding intent into ranked API/event candidates with next lookup guidance | `"track spell cooldown"`, `"listen for aura changes"` |
 | `wiki_search` | Search API/event/technical documentation pages only | `"spell cooldown"`, `"unit aura tracking"` |
 | `wiki_namespace` | List all pages under a namespace prefix | `C_Spell`, `C_Item`, `GetSpell` |
 
@@ -42,9 +45,20 @@ Fetches a specific API function, event, or exact technical page and returns read
 - **Auto-detection:** Function names get an `API_` prefix for the wiki page title (`C_Spell.GetSpellCooldown` -> `API_C_Spell.GetSpellCooldown`). Event names in ALL_CAPS are used as-is (`SPELL_UPDATE_COOLDOWN`).
 - **Section filtering:** Optional `section` parameter narrows the response to: `description`, `arguments`, `returns`, `payload`, `details`, `example`, `patch_changes`, `see_also`, `fields`, `members`, `values`, `related_events`, or `all` (default).
 - **Deprecation notices:** Automatically extracted and displayed when present.
-- **Structured output:** Includes normalized fields such as `pageKind`, `description`, `payload`, `patchChanges`, `relatedEvents`, `availableSections`, `deprecationInfo`, and structured section data like `argumentsData`, `returnsData`, and `payloadData`.
+- **Structured output:** Includes normalized fields such as `pageKind`, `description`, `payload`, `patchChanges`, `relatedEvents`, `relatedEventsData`, `warnings`, `codingNotes`, `availableSections`, `deprecationInfo`, and structured section data like `argumentsData`, `returnsData`, and `payloadData`.
 - **Conflict-aware deprecation metadata:** `deprecationInfo` now includes `hasConflict`, `conflictDetails`, and `recommendedState` so callers can detect when banner text and patch history disagree.
+- **Coding guidance:** Extracts warning and info notes from wiki prose, such as deprecated APIs, nil returns, restricted/secret behavior, and event-timing gotchas.
+- **Related events:** Extracts event names from related-event sections and behavioral notes so callers can discover the events they should inspect next.
 - **Lean section focus:** When `section` is provided, the response also includes `selectedSection`, `selectedSectionText`, and `selectedSectionData`.
+
+### wiki_resolve
+
+Resolves coding-oriented questions into a short ranked list of likely API, event, enum, widget, or technical pages.
+
+- **Intent cleanup:** Removes common coding verbs such as "track", "listen", and "detect" so an agent can search for the actual API terms.
+- **Targeted rewrites:** Adds focused searches for common WoW addon tasks, such as cooldown tracking and aura updates.
+- **Agent handoff:** Returns confidence, deprecation state, related events, warnings, coding notes, available sections, and suggested follow-up `wiki_lookup` calls.
+- **Scope:** Still limited to API and closely related technical documentation; it does not browse general wiki articles.
 
 ### wiki_search
 
@@ -90,10 +104,11 @@ All data comes from [warcraft.wiki.gg](https://warcraft.wiki.gg) via its MediaWi
 | Endpoint | Used by | What it returns |
 |----------|---------|-----------------|
 | `action=parse&page={title}` | `wiki_lookup` | Full page HTML + section metadata |
-| `action=query&list=search` | `wiki_search` | Matching pages with text snippets |
+| `action=parse&page={title}` | `wiki_resolve` | Details for the final ranked candidates |
+| `action=query&list=search` | `wiki_search`, `wiki_resolve` | Matching pages with text snippets |
 | `action=query&list=allpages` | `wiki_namespace` | All pages matching a title prefix |
 
-The wiki returns MediaWiki HTML. The parser strips noise (navigation, compatibility metadata tables, info boxes), extracts deprecation notices, surfaces banner-vs-patch conflicts, salvages legacy inline sections, splits content at `<h2>` boundaries into named sections, and converts HTML to clean text (code blocks become markdown fences, definition lists become indented text, tables become pipe-separated rows).
+The wiki returns MediaWiki HTML. The parser strips noise (navigation, compatibility metadata tables, info boxes), extracts deprecation notices, surfaces banner-vs-patch conflicts, salvages legacy inline sections, splits content at `<h2>` boundaries into named sections, derives related-event and coding-note signals, and converts HTML to clean text (code blocks become markdown fences, definition lists become indented text, tables become pipe-separated rows).
 
 ```
 src/
@@ -110,13 +125,13 @@ The content source is low maintenance because it comes live from the wiki, but t
 
 ## Testing
 
-Run the smoke test with:
+Run the parser fixtures and live smoke test with:
 
 ```bash
 npm test
 ```
 
-The smoke test spins up the local MCP server through the SDK client and verifies representative lookup and search behavior against live wiki data.
+The parser test checks stable local fixtures for structured table output and coding-note extraction. The smoke test spins up the local MCP server through the SDK client and verifies representative lookup, resolver, and search behavior against live wiki data.
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|

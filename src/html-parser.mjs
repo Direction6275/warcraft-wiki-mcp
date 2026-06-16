@@ -193,6 +193,72 @@ export function isInScopePageKind(pageKind) {
 	return pageKind !== 'unknown';
 }
 
+export function deriveRelatedEvents(parsed) {
+	const eventNames = new Set();
+	const textSources = [
+		parsed?.sections?.related_events,
+		parsed?.sections?.details,
+		parsed?.description,
+		parsed?.sections?.payload,
+		parsed?.sections?.returns,
+	].filter(Boolean);
+
+	for (const text of textSources) {
+		for (const eventName of extractEventNames(text)) {
+			eventNames.add(eventName);
+		}
+	}
+
+	return [...eventNames].sort();
+}
+
+export function deriveCodingNotes(parsed, relatedEvents = deriveRelatedEvents(parsed)) {
+	const notes = [];
+
+	if (parsed?.deprecationInfo?.recommendedState !== 'active') {
+		notes.push({
+			severity: 'warning',
+			topic: 'deprecation',
+			text: parsed.deprecationInfo.note || `This page is ${parsed.deprecationInfo.recommendedState}.`,
+			relatedEvents: [],
+			sourceSection: 'deprecation',
+		});
+	}
+
+	const sections = [
+		['description', parsed?.description],
+		['arguments', parsed?.sections?.arguments],
+		['returns', parsed?.sections?.returns],
+		['payload', parsed?.sections?.payload],
+		['details', parsed?.sections?.details],
+		['patch_changes', parsed?.sections?.patch_changes],
+	];
+
+	for (const [sourceSection, text] of sections) {
+		for (const candidate of splitCodingNoteCandidates(text)) {
+			const classification = classifyCodingNote(candidate);
+			if (!classification) continue;
+
+			const noteEvents = extractEventNames(candidate);
+			notes.push({
+				severity: classification.severity,
+				topic: classification.topic,
+				text: cleanCodingNoteText(candidate),
+				relatedEvents: noteEvents.length > 0 ? noteEvents : classification.topic === 'event_timing' ? relatedEvents : [],
+				sourceSection,
+			});
+		}
+	}
+
+	const deduped = new Map();
+	for (const note of notes) {
+		const key = `${note.topic}:${note.text}`;
+		if (!deduped.has(key)) deduped.set(key, note);
+	}
+
+	return [...deduped.values()].slice(0, 12);
+}
+
 export function stripHtmlTags(text) {
 	return String(text || '')
 		.replace(/<[^>]+>/g, '')
@@ -964,7 +1030,7 @@ function cleanDocBlock(block) {
 
 	if (block.kind === 'table') {
 		const headers = (block.headers || []).map(normalizeText).filter(Boolean);
-		const rows = (block.rows || []).map(row => row.map(normalizeText));
+		const rows = (block.rows || []).map(row => row.map(cell => normalizeText(cell) || ''));
 		if (headers.length === 0 && rows.length === 0) return null;
 		return { kind: 'table', headers, rows };
 	}
@@ -1237,6 +1303,53 @@ function normalizeText(text) {
 		.replace(/\s+([?!,.;:)])/g, '$1')
 		.replace(/([(])\s+/g, '$1')
 		.trim() || null;
+}
+
+function extractEventNames(text) {
+	const matches = String(text || '').match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) || [];
+	return [...new Set(matches)]
+		.filter(name => !/^API_/.test(name))
+		.filter(name => !/^UIOBJECT_/.test(name))
+		.filter(name => name !== 'N/A');
+}
+
+function splitCodingNoteCandidates(text) {
+	return String(text || '')
+		.split(/\n+/)
+		.flatMap(line => String(line).split(/(?<=[.!?])\s+/))
+		.map(line => normalizeText(line?.replace(/^\s*[-*]\s+/, '')))
+		.filter(Boolean);
+}
+
+function classifyCodingNote(text) {
+	const normalized = String(text || '');
+
+	if (/not updated immediately|do not trust|unless responding to|only trust/i.test(normalized)) {
+		return { severity: 'warning', topic: 'event_timing' };
+	}
+	if (/\b(secret|SecretWhen|protected|forbidden|restricted|taint|combat lockdown|not available in combat|cannot be used|can't be used)\b/i.test(normalized)) {
+		return { severity: 'warning', topic: 'restriction' };
+	}
+	if (/\bdeprecated\b|\bremoved\b/i.test(normalized)) {
+		return { severity: 'warning', topic: 'deprecation' };
+	}
+	if (/\breturns?\s+nil\b|\bnil if\b/i.test(normalized)) {
+		return { severity: 'info', topic: 'nil_result' };
+	}
+	if (/\breplacement for\b|\breplaced by\b/i.test(normalized)) {
+		return { severity: 'info', topic: 'replacement' };
+	}
+
+	return null;
+}
+
+function cleanCodingNoteText(text) {
+	const normalized = normalizeText(text) || '';
+	const tableMatch = normalized.match(/^([^|]+)\s+\|\s+([^|]+)\s+\|\s+(.+)$/);
+	if (tableMatch) {
+		return `${tableMatch[1].trim()} (${tableMatch[2].trim()}): ${tableMatch[3].trim()}`;
+	}
+	return normalized;
 }
 
 function escapeRegExp(text) {

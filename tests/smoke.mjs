@@ -53,6 +53,19 @@ async function main() {
 		assert(payloadData.selectedSectionText, 'Expected selectedSectionText for payload');
 		assert(payloadData.selectedSectionData?.items?.some(item => item.name === 'spellID'), 'Expected payload spellID item');
 
+		const unitAura = await client.callTool({ name: 'wiki_lookup', arguments: { name: 'UNIT_AURA', section: 'payload' } });
+		const unitAuraData = unitAura.structuredContent;
+		assert(unitAuraData.selectedSection === 'payload', 'Expected UNIT_AURA selectedSection=payload');
+		assert(unitAuraData.payloadData?.blocks?.some(block => block.kind === 'table'), 'Expected UNIT_AURA payload table data');
+		for (const block of unitAuraData.payloadData.blocks) {
+			if (block.kind !== 'table') continue;
+			for (const row of block.rows || []) {
+				for (const cell of row) {
+					assert(typeof cell === 'string', 'Expected UNIT_AURA table cells to validate as strings');
+				}
+			}
+		}
+
 		const widgetLookup = await client.callTool({ name: 'wiki_lookup', arguments: { name: 'GameTooltip SetUnitAura' } });
 		const widgetData = widgetLookup.structuredContent;
 		assert(widgetData.title === 'GameTooltip:SetUnitAura', 'Expected normalized widget method title');
@@ -89,6 +102,20 @@ async function main() {
 			'Expected unit aura search results to include a modern API or event'
 		);
 		assert(typeof lookupData.returns === 'string', 'Expected legacy string field returns to remain present');
+		assert(lookupData.relatedEventsData?.includes('SPELL_UPDATE_COOLDOWN'), 'Expected related event signal for spell cooldown lookup');
+		assert(
+			lookupData.warnings?.some(note => note.text.includes('not updated immediately') || note.text.includes('Do not trust')),
+			'Expected coding warning signal for spell cooldown lookup'
+		);
+
+		const resolved = await client.callTool({ name: 'wiki_resolve', arguments: { query: 'track spell cooldown', limit: 3 } });
+		const recommendations = resolved.structuredContent.recommendations;
+		assert(recommendations.length > 0, 'Expected wiki_resolve recommendations');
+		assert(recommendations[0].recommendedNextTools.some(tool => tool.includes('wiki_lookup')), 'Expected wiki_resolve next tool guidance');
+		assert(
+			recommendations.some(recommendation => recommendation.title === 'C_Spell.GetSpellCooldown'),
+			'Expected wiki_resolve to recommend C_Spell.GetSpellCooldown for cooldown tracking'
+		);
 
 		console.log('Smoke test passed.');
 	} finally {

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/index.mjs",
-    "test": "node tests/smoke.mjs"
+    "test": "node tests/parser.mjs && node tests/smoke.mjs"
   },
   "license": "MIT",
   "engines": {

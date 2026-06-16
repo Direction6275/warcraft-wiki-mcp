@@ -12,6 +12,8 @@ import {
 	isInScopePageKind,
 	wikiPageUrl,
 	normalizeCategories,
+	deriveRelatedEvents,
+	deriveCodingNotes,
 } from './html-parser.mjs';
 
 const client = new WikiClient();
@@ -53,6 +55,31 @@ const DATA_SECTION_MAP = {
 	values: 'valuesData',
 };
 const SEARCH_PAGE_LIMIT = 50;
+const RESOLVE_STOP_WORDS = new Set([
+	'a',
+	'an',
+	'and',
+	'check',
+	'detect',
+	'display',
+	'find',
+	'for',
+	'get',
+	'handle',
+	'listen',
+	'listening',
+	'show',
+	'the',
+	'to',
+	'track',
+	'tracking',
+	'update',
+	'updates',
+	'use',
+	'using',
+	'watch',
+	'when',
+]);
 
 const docItemSchema = z.lazy(() => z.object({
 	name: z.string(),
@@ -88,6 +115,14 @@ const deprecationInfoSchema = z.object({
 	recommendedState: z.enum(['active', 'deprecated', 'removed']),
 });
 
+const codingNoteSchema = z.object({
+	severity: z.enum(['info', 'warning']),
+	topic: z.string(),
+	text: z.string(),
+	relatedEvents: z.array(z.string()),
+	sourceSection: z.string().nullable(),
+});
+
 const lookupOutputSchema = z.object({
 	error: z.string().nullable(),
 	pageKind: z.enum(PAGE_KINDS),
@@ -107,6 +142,9 @@ const lookupOutputSchema = z.object({
 	members: z.string().nullable(),
 	values: z.string().nullable(),
 	relatedEvents: z.string().nullable(),
+	relatedEventsData: z.array(z.string()),
+	warnings: z.array(codingNoteSchema),
+	codingNotes: z.array(codingNoteSchema),
 	argumentsData: docSectionSchema.nullable(),
 	returnsData: docSectionSchema.nullable(),
 	payloadData: docSectionSchema.nullable(),
@@ -131,6 +169,30 @@ const searchOutputSchema = z.object({
 	query: z.string(),
 	scope: z.literal('api-docs'),
 	results: z.array(searchResultSchema),
+});
+
+const resolveRecommendationSchema = z.object({
+	title: z.string(),
+	url: z.string(),
+	pageKind: z.enum(PAGE_KINDS),
+	snippet: z.string().nullable(),
+	confidence: z.enum(['high', 'medium', 'low']),
+	score: z.number(),
+	reason: z.string(),
+	recommendedNextTools: z.array(z.string()),
+	deprecationInfo: deprecationInfoSchema,
+	relatedEventsData: z.array(z.string()),
+	warnings: z.array(codingNoteSchema),
+	codingNotes: z.array(codingNoteSchema),
+	availableSections: z.array(z.string()),
+	error: z.string().nullable(),
+});
+
+const resolveOutputSchema = z.object({
+	error: z.string().nullable(),
+	query: z.string(),
+	scope: z.literal('api-docs'),
+	recommendations: z.array(resolveRecommendationSchema),
 });
 
 const namespaceOutputSchema = z.object({
@@ -202,7 +264,15 @@ function lookupAvailableSections(parsed) {
 	return sections;
 }
 
+function buildLookupSignals(parsed) {
+	const relatedEventsData = deriveRelatedEvents(parsed);
+	const codingNotes = deriveCodingNotes(parsed, relatedEventsData);
+	const warnings = codingNotes.filter(note => note.severity === 'warning');
+	return { relatedEventsData, codingNotes, warnings };
+}
+
 function buildLookupOutput(parsed, section = 'all', error = null) {
+	const signals = buildLookupSignals(parsed);
 	const output = {
 		error,
 		pageKind: parsed.pageKind,
@@ -221,7 +291,10 @@ function buildLookupOutput(parsed, section = 'all', error = null) {
 		fields: parsed.sections.fields || null,
 		members: parsed.sections.members || null,
 		values: parsed.sections.values || null,
-		relatedEvents: parsed.sections.related_events || null,
+		relatedEvents: parsed.sections.related_events || (signals.relatedEventsData.length > 0 ? signals.relatedEventsData.join('\n') : null),
+		relatedEventsData: signals.relatedEventsData,
+		warnings: signals.warnings,
+		codingNotes: signals.codingNotes,
 		argumentsData: parsed.sectionData.arguments || null,
 		returnsData: parsed.sectionData.returns || null,
 		payloadData: parsed.sectionData.payload || null,
@@ -273,6 +346,9 @@ function buildEmptyLookupOutput(name, attemptedTitle, error, section = 'all') {
 		members: null,
 		values: null,
 		relatedEvents: null,
+		relatedEventsData: [],
+		warnings: [],
+		codingNotes: [],
 		argumentsData: null,
 		returnsData: null,
 		payloadData: null,
@@ -295,6 +371,7 @@ function getSelectedSectionData(parsed, section, sectionText) {
 
 function formatLookupResult(parsed, section = 'all') {
 	const lines = [];
+	const signals = buildLookupSignals(parsed);
 	lines.push(`=== ${parsed.title} ===`);
 	lines.push(`Kind: ${parsed.pageKind}`);
 	lines.push(`Source: ${parsed.url}`);
@@ -302,6 +379,15 @@ function formatLookupResult(parsed, section = 'all') {
 
 	if (parsed.deprecated) {
 		lines.push(`[DEPRECATED] ${parsed.deprecated}`);
+		lines.push('');
+	}
+
+	if (signals.codingNotes.length > 0) {
+		lines.push('Coding notes:');
+		for (const note of signals.codingNotes) {
+			const related = note.relatedEvents.length > 0 ? ` Related events: ${note.relatedEvents.join(', ')}.` : '';
+			lines.push(`- [${note.severity}] ${note.text}${related}`);
+		}
 		lines.push('');
 	}
 
@@ -473,7 +559,7 @@ function trailingWordPenalty(memberNorm, normalizedQuery) {
 	return 0;
 }
 
-async function runScopedSearch(query, limit) {
+async function runRankedScopedSearch(query, limit) {
 	const searchQueries = buildSearchQueries(query);
 	const rawResults = [];
 
@@ -501,11 +587,19 @@ async function runScopedSearch(query, limit) {
 	const results = shortlisted
 		.map(result => classifySearchResult(result, metadataByTitle[result.title] || null))
 		.filter(result => isInScopePageKind(result.pageKind))
-		.sort((a, b) => scoreSearchResult(b, normalizedQuery) - scoreSearchResult(a, normalizedQuery))
-		.slice(0, limit)
-		.map(({ title, url, pageKind, snippet }) => ({ title, url, pageKind, snippet }));
+		.map(result => ({
+			...result,
+			score: scoreSearchResult(result, normalizedQuery),
+		}))
+		.sort((a, b) => b.score - a.score)
+		.slice(0, limit);
 
 	return results;
+}
+
+async function runScopedSearch(query, limit) {
+	const results = await runRankedScopedSearch(query, limit);
+	return results.map(({ title, url, pageKind, snippet }) => ({ title, url, pageKind, snippet }));
 }
 
 function formatSearchResult(query, results) {
@@ -515,6 +609,174 @@ function formatSearchResult(query, results) {
 		lines.push(`${index + 1}. ${result.title} [${result.pageKind}]`);
 		if (result.snippet) lines.push(`   ${result.snippet}`);
 		lines.push(`   ${result.url}`);
+		lines.push('');
+	}
+	return lines.join('\n').trim();
+}
+
+async function buildResolveRecommendations(query, limit) {
+	const rankedResults = await runRankedResolveSearch(query, Math.min(limit || 5, 5));
+	const topScore = rankedResults[0]?.score || 0;
+	const recommendations = [];
+
+	for (let index = 0; index < rankedResults.length; index++) {
+		const result = rankedResults[index];
+		const details = await lookupResolveDetails(result);
+		const confidence = resolveConfidence(result, index, topScore);
+		const recommendation = {
+			title: result.title,
+			url: result.url,
+			pageKind: result.pageKind,
+			snippet: result.snippet,
+			confidence,
+			score: result.score,
+			reason: buildResolveReason(result, confidence, details),
+			recommendedNextTools: buildRecommendedNextTools(result, details),
+			...details,
+		};
+		recommendations.push(recommendation);
+	}
+
+	return recommendations;
+}
+
+async function runRankedResolveSearch(query, limit) {
+	const resultMap = new Map();
+	const resolveQueries = buildResolveSearchQueries(query);
+
+	for (const resolveQuery of resolveQueries) {
+		const results = await runRankedScopedSearch(resolveQuery, Math.max(limit, 5));
+		const queryBoost = resolveQuery === query ? 0 : 25;
+		for (const result of results) {
+			const key = result.rawTitle || result.title;
+			const existing = resultMap.get(key);
+			const adjusted = {
+				...result,
+				score: result.score + queryBoost,
+			};
+			if (!existing || adjusted.score > existing.score) {
+				resultMap.set(key, adjusted);
+			}
+		}
+	}
+
+	return [...resultMap.values()]
+		.sort((a, b) => b.score - a.score)
+		.slice(0, limit);
+}
+
+function buildResolveSearchQueries(query) {
+	const normalized = normalizeSearchText(query);
+	const words = normalized.split(' ').filter(word => word && !RESOLVE_STOP_WORDS.has(word));
+	const stripped = words.join(' ');
+	const queries = [];
+
+	if (/\bcooldown\b/i.test(normalized)) {
+		queries.push('spell cooldown', 'cooldown event');
+	}
+	if (/\baura\b/i.test(normalized) && /\b(change|changes|update|updates|removed|added|track|tracking|listen|listening)\b/i.test(normalized)) {
+		queries.push('unit aura', 'UNIT_AURA');
+	}
+	if (/\btooltip\b/i.test(normalized) && /\baura\b/i.test(normalized)) {
+		queries.push('tooltip aura', 'GameTooltip SetUnitAura');
+	}
+	if (stripped && stripped !== normalized) queries.push(stripped);
+	if (queries.length === 0) queries.push(query);
+	if (stripped === normalized && !queries.includes(query)) queries.push(query);
+
+	return [...new Set(queries.filter(Boolean))].slice(0, 4);
+}
+
+async function lookupResolveDetails(result) {
+	try {
+		const data = await client.fetchPage(result.rawTitle || normalizePageTitle(result.title));
+		if (data.error || !data.parse?.text?.['*']) {
+			const message = data.error?.info || data.error?.code || 'No page content returned.';
+			return buildEmptyResolveDetails(`Unable to inspect candidate details: ${message}`);
+		}
+
+		const parsed = parseWikiPage(data.parse.text['*'], data.parse.title || result.rawTitle, data.parse?.categories || []);
+		const signals = buildLookupSignals(parsed);
+		return {
+			deprecationInfo: parsed.deprecationInfo,
+			relatedEventsData: signals.relatedEventsData,
+			warnings: signals.warnings,
+			codingNotes: signals.codingNotes,
+			availableSections: lookupAvailableSections(parsed),
+			error: null,
+		};
+	} catch (error) {
+		return buildEmptyResolveDetails(`Unable to inspect candidate details: ${error.message}`);
+	}
+}
+
+function buildEmptyResolveDetails(error = null) {
+	return {
+		deprecationInfo: {
+			isDeprecated: false,
+			note: null,
+			deprecatedIn: null,
+			removedIn: null,
+			replacementApis: [],
+			source: null,
+			hasConflict: false,
+			conflictDetails: [],
+			recommendedState: 'active',
+		},
+		relatedEventsData: [],
+		warnings: [],
+		codingNotes: [],
+		availableSections: [],
+		error,
+	};
+}
+
+function resolveConfidence(result, index, topScore) {
+	if (index === 0 && result.score >= 1700) return 'high';
+	if (result.score >= Math.max(1000, topScore * 0.65)) return 'medium';
+	return 'low';
+}
+
+function buildResolveReason(result, confidence, details) {
+	const parts = [`${confidence} confidence ${result.pageKind} match from API-scoped search.`];
+	if (details.deprecationInfo.recommendedState !== 'active') {
+		parts.push(`Marked ${details.deprecationInfo.recommendedState}; prefer a replacement when one is listed.`);
+	}
+	if (details.relatedEventsData.length > 0) {
+		parts.push(`Related events: ${details.relatedEventsData.join(', ')}.`);
+	}
+	if (details.warnings.length > 0) {
+		parts.push(`${details.warnings.length} coding warning(s) found.`);
+	}
+	if (details.error) {
+		parts.push(details.error);
+	}
+	return parts.join(' ');
+}
+
+function buildRecommendedNextTools(result, details) {
+	const nextTools = [`wiki_lookup({ "name": "${result.title}" })`];
+	if (details.relatedEventsData.length > 0) {
+		for (const eventName of details.relatedEventsData.slice(0, 3)) {
+			nextTools.push(`wiki_lookup({ "name": "${eventName}", "section": "payload" })`);
+		}
+	}
+	return nextTools;
+}
+
+function formatResolveResult(query, recommendations) {
+	if (recommendations.length === 0) {
+		return `No in-scope API documentation recommendations found for "${query}".`;
+	}
+
+	const lines = [`Wiki API resolution: "${query}"`, ''];
+	for (let index = 0; index < recommendations.length; index++) {
+		const recommendation = recommendations[index];
+		lines.push(`${index + 1}. ${recommendation.title} [${recommendation.pageKind}, ${recommendation.confidence}]`);
+		lines.push(`   ${recommendation.reason}`);
+		if (recommendation.snippet) lines.push(`   ${recommendation.snippet}`);
+		lines.push(`   Next: ${recommendation.recommendedNextTools.join(' -> ')}`);
+		lines.push(`   ${recommendation.url}`);
 		lines.push('');
 	}
 	return lines.join('\n').trim();
@@ -634,6 +896,48 @@ server.registerTool(
 					query,
 					scope: 'api-docs',
 					results: [],
+				},
+				isError: true,
+			};
+		}
+	}
+);
+
+server.registerTool(
+	'wiki_resolve',
+	{
+		description: `Resolve a coding-oriented WoW API question into ranked Warcraft Wiki documentation candidates.
+
+Use this when an agent knows the intended behavior but not the exact API, event, enum, or widget page to inspect. Results include confidence, deprecation state, related events, coding warnings, and suggested follow-up wiki_lookup calls.`,
+		inputSchema: {
+			query: z.string().describe('Coding intent or technical search terms (e.g. "track spell cooldown", "listen for aura changes", "tooltip aura API")'),
+			limit: z.number().optional().describe('Max recommendations to return after filtering (default: 5, max: 5)'),
+		},
+		outputSchema: resolveOutputSchema,
+	},
+	async ({ query, limit }) => {
+		try {
+			const recommendations = await buildResolveRecommendations(query, limit);
+			const structuredContent = {
+				error: null,
+				query,
+				scope: 'api-docs',
+				recommendations,
+			};
+
+			return {
+				content: [{ type: 'text', text: formatResolveResult(query, recommendations) }],
+				structuredContent,
+			};
+		} catch (error) {
+			const message = `Wiki resolution failed: ${error.message}`;
+			return {
+				content: [{ type: 'text', text: message }],
+				structuredContent: {
+					error: message,
+					query,
+					scope: 'api-docs',
+					recommendations: [],
 				},
 				isError: true,
 			};
